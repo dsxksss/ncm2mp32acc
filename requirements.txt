@@ -1,0 +1,7 @@
+# 人声分离（基于 UVR 模型，自带 CLI / Python API，自动下载模型）
+# GPU 版（需要 NVIDIA + CUDA）。纯 CPU 机器请改成 audio-separator[cpu]
+audio-separator[gpu]
+
+# 说明：
+#   - 还需要系统已安装 ffmpeg（本机已通过 winget 安装，已在 PATH 中）
+#   - torch / onnxruntime-gpu 会作为依赖自动安装

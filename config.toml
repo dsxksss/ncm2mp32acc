@@ -1,0 +1,24 @@
+# ncm2acc 配置文件
+# 修改后保存即可，下次运行生效。命令行参数会覆盖这里的设置。
+# Windows 路径用单引号（字面量字符串），反斜杠 \ 无需转义。
+# 任意一项留空字符串 ''，则使用程序内置默认值。
+
+# 监听目录：把 .ncm 文件丢进这里就会自动处理
+watch = 'E:\ncm2mp32acc\watch'
+
+# 输出目录：伴奏 + 解密后的完整歌曲都放这里
+output = 'E:\ncm2mp32acc\output'
+
+# ---- 以下一般不用改 ----
+
+# 伴奏分离模型（音质最强的 BS-Roformer）
+# 想更快/更省显存可换成 'UVR-MDXNET_KARA_2.onnx'
+model = 'model_bs_roformer_ep_317_sdr_12.9755.ckpt'
+
+# 伴奏输出格式（MP3 / FLAC / WAV）与 mp3 码率
+fmt = 'MP3'
+bitrate = '320k'
+
+# 轮询间隔(秒) / 文件写入稳定检测次数（连续 N 次大小不变才开始处理）
+poll = 3.0
+stable = 2
