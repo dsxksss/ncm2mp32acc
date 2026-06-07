@@ -22,3 +22,8 @@ bitrate = '320k'
 # 轮询间隔(秒) / 文件写入稳定检测次数（连续 N 次大小不变才开始处理）
 poll = 3.0
 stable = 2
+
+# 去重方式：
+#   'record' = 原 .ncm 留在原地不动，用哈希清单去重（清单见 watch\.ncm2acc_processed.json）
+#   'move'   = 处理后把原 .ncm 移到 watch\processed\，失败移到 watch\failed\
+dedup = 'record'

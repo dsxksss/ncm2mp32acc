@@ -9,7 +9,9 @@
 - `<歌名>.mp3`（或 `.flac`）—— 解密后的完整歌曲
 - `<歌名> (伴奏).mp3` —— 提取出的伴奏
 
-原始 `.ncm` 处理成功后移到 `watch\processed\`，失败的移到 `watch\failed\`。
+**避免重复处理**有两种方式（config.toml 的 `dedup` 或 `--dedup`）：
+- `record`（默认）：原 `.ncm` **留在原地不动**，用内容哈希记到清单 `watch\.ncm2acc_processed.json` 去重。
+- `move`：处理成功后把原 `.ncm` 移到 `watch\processed\`，失败的移到 `watch\failed\`。
 
 ---
 
@@ -76,6 +78,7 @@ output = 'D:\Music\伴奏'          # 输出目录
 | `--model`   | 分离模型 | `model_bs_roformer_ep_317_sdr_12.9755.ckpt` |
 | `--fmt`     | 伴奏格式 MP3/FLAC/WAV | `MP3` |
 | `--bitrate` | 伴奏 mp3 码率 | `320k` |
+| `--dedup`   | 去重方式 `record`（原文件留原地+哈希清单）/ `move`（移到 processed） | `record` |
 | `--once`    | 批处理一次后退出 | （默认持续监听） |
 
 ---

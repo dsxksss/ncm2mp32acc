@@ -6,10 +6,12 @@ ncm2acc — 监听文件夹中的新 .ncm 文件并自动处理：
     1) 用 ncmdump-go.exe 把 .ncm 解密成 mp3 / flac（完整歌曲）
     2) 用 audio-separator (BS-Roformer, GPU) 去人声，提取伴奏(instrumental)
 
-处理完成后：
-    - 保留：伴奏 + 解密后的完整歌曲（都放在 output\\）
-    - 原 .ncm 移动到  watch\\processed\\   （避免重复处理）
-    - 解密或分离失败的 .ncm 移动到  watch\\failed\\
+处理完成后保留：伴奏 + 解密后的完整歌曲（都放在 output\\）。
+
+去重方式（config.toml 的 dedup 或 --dedup）：
+    - record（默认）：原 .ncm 留在原地不动，用内容哈希清单去重
+                      （清单文件 watch\\.ncm2acc_processed.json）
+    - move          ：处理后把原 .ncm 移到 watch\\processed\\，失败移到 watch\\failed\\
 
 用法：
     python ncm2acc.py                # 持续监听 .\watch 文件夹（默认）
@@ -18,6 +20,8 @@ ncm2acc — 监听文件夹中的新 .ncm 文件并自动处理：
 """
 
 import argparse
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -40,6 +44,7 @@ DEFAULTS = {
     "bitrate":   "320k",                                          # 伴奏 mp3 码率
     "poll":      3.0,                                             # 轮询间隔（秒）
     "stable":    2,                                               # 文件大小连续 N 次不变才视为写入完成
+    "dedup":     "record",                                        # 去重方式：record（哈希清单）/ move（移动文件）
 }
 
 # ncmdump 可能输出的音频后缀（.ncm 内部可能是 mp3 或 flac）
@@ -130,25 +135,105 @@ def extract_instrumental(separator, song: Path, fmt: str) -> Path | None:
     return clean
 
 
-def process_one(ncm: Path, cfg: dict, separator, processed: Path, failed: Path) -> None:
+# ----------------------------- 去重策略 -----------------------------
+def file_hash(path: Path, chunk: int = 1 << 20) -> str:
+    """计算文件 SHA-256（按块读取，省内存）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+class MoveDedup:
+    """move 模式：处理后把原 .ncm 移到 processed\\ / failed\\，靠“文件已移走”去重。"""
+
+    def __init__(self, watch: Path):
+        self.processed = watch / "processed"; self.processed.mkdir(parents=True, exist_ok=True)
+        self.failed = watch / "failed"; self.failed.mkdir(parents=True, exist_ok=True)
+
+    def pre_skip(self, ncm: Path, size: int, mtime: float) -> bool:
+        return False
+
+    def need_process(self, ncm: Path, size: int, mtime: float) -> bool:
+        return True
+
+    def mark(self, ncm: Path, ok: bool) -> None:
+        dest = self.processed if ok else self.failed
+        shutil.move(str(ncm), str(dest / ncm.name))
+
+
+class RecordDedup:
+    """record 模式：原 .ncm 留在原地，用内容哈希清单 .ncm2acc_processed.json 去重。"""
+
+    def __init__(self, watch: Path):
+        self.manifest = watch / ".ncm2acc_processed.json"
+        self.done, self.failed = self._load()
+        self._cache: dict[str, tuple] = {}   # path -> (size, mtime)：已判定，跳过且不再哈希
+        self._hash: dict[str, str] = {}      # path -> hash：本轮暂存供 mark 复用
+
+    def _load(self):
+        if self.manifest.exists():
+            try:
+                d = json.loads(self.manifest.read_text("utf-8"))
+                return d.get("done", {}), d.get("failed", {})
+            except Exception:  # noqa: BLE001
+                log.warning("清单文件损坏，将重建：%s", self.manifest)
+        return {}, {}
+
+    def _save(self):
+        tmp = self.manifest.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"done": self.done, "failed": self.failed}, ensure_ascii=False, indent=1),
+            "utf-8",
+        )
+        tmp.replace(self.manifest)   # 原子替换，避免写一半损坏
+
+    def pre_skip(self, ncm: Path, size: int, mtime: float) -> bool:
+        # 已判定过且大小/时间未变 → 直接跳过，连哈希都不算
+        return self._cache.get(str(ncm)) == (size, mtime)
+
+    def need_process(self, ncm: Path, size: int, mtime: float) -> bool:
+        h = file_hash(ncm)
+        self._hash[str(ncm)] = h
+        if h in self.done or h in self.failed:
+            self._cache[str(ncm)] = (size, mtime)   # 记住，避免下轮重复哈希
+            return False
+        return True
+
+    def mark(self, ncm: Path, ok: bool) -> None:
+        h = self._hash.pop(str(ncm), None) or file_hash(ncm)
+        rec = {"name": ncm.name, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+        (self.done if ok else self.failed)[h] = rec
+        self._save()
+        try:
+            st = ncm.stat()
+            self._cache[str(ncm)] = (st.st_size, st.st_mtime)
+        except OSError:
+            pass
+
+
+def make_dedup(cfg: dict, watch: Path):
+    return RecordDedup(watch) if cfg["dedup"] == "record" else MoveDedup(watch)
+
+
+def process_one(ncm: Path, cfg: dict, separator) -> bool:
+    """处理单个 .ncm；成功返回 True，失败返回 False（移动/记录由调用方按去重策略决定）。"""
     log.info("▶ 处理：%s", ncm.name)
     t0 = time.time()
 
     song = decrypt_ncm(ncm, cfg["output"], cfg["ncmdump"])
     if song is None:
-        shutil.move(str(ncm), str(failed / ncm.name))
-        return
+        return False
     log.info("  ✓ 解密 → %s", song.name)
 
     inst = extract_instrumental(separator, song, cfg["fmt"])
     if inst is None:
-        shutil.move(str(ncm), str(failed / ncm.name))
-        return
+        return False
     log.info("  ✓ 伴奏 → %s", inst.name)
 
-    # 成功：原 .ncm 移到 processed
-    shutil.move(str(ncm), str(processed / ncm.name))
     log.info("✔ 完成（%.1fs）：%s", time.time() - t0, ncm.name)
+    return True
 
 
 def make_separator(cfg: dict):
@@ -174,11 +259,8 @@ def make_separator(cfg: dict):
 
 
 # ----------------------------- 运行模式 -----------------------------
-def run_once(cfg: dict, separator) -> None:
+def run_once(cfg: dict, separator, dedup) -> None:
     watch = cfg["watch"]
-    processed = watch / "processed"; processed.mkdir(parents=True, exist_ok=True)
-    failed = watch / "failed"; failed.mkdir(parents=True, exist_ok=True)
-
     files = sorted(watch.glob("*.ncm"))
     if not files:
         log.info("没有待处理的 .ncm 文件：%s", watch)
@@ -186,26 +268,32 @@ def run_once(cfg: dict, separator) -> None:
     log.info("批处理 %d 个文件…", len(files))
     for ncm in files:
         try:
-            process_one(ncm, cfg, separator, processed, failed)
+            st = ncm.stat()
+            if not dedup.need_process(ncm, st.st_size, st.st_mtime):
+                log.info("⏭ 已处理过，跳过：%s", ncm.name)
+                continue
+            ok = process_one(ncm, cfg, separator)
+            dedup.mark(ncm, ok)
         except Exception as e:  # noqa: BLE001
             log.exception("处理 %s 时出错：%s", ncm.name, e)
 
 
-def run_watch(cfg: dict, separator) -> None:
+def run_watch(cfg: dict, separator, dedup) -> None:
     watch = cfg["watch"]; watch.mkdir(parents=True, exist_ok=True)
-    processed = watch / "processed"; processed.mkdir(exist_ok=True)
-    failed = watch / "failed"; failed.mkdir(exist_ok=True)
 
-    log.info("开始监听（每 %.0fs 轮询一次）：%s", cfg["poll"], watch)
+    log.info("开始监听（每 %.0fs 轮询一次，去重=%s）：%s", cfg["poll"], cfg["dedup"], watch)
     log.info("把 .ncm 文件丢进该文件夹即可自动处理。Ctrl+C 退出。")
 
-    seen: dict[str, tuple[int, int]] = {}  # path -> (last_size, stable_count)
+    seen: dict[str, tuple] = {}  # path -> (last_size, stable_count)
     while True:
         for ncm in sorted(watch.glob("*.ncm")):
             key = str(ncm)
             try:
-                size = ncm.stat().st_size
+                st = ncm.stat()
             except OSError:
+                continue
+            size, mtime = st.st_size, st.st_mtime
+            if dedup.pre_skip(ncm, size, mtime):    # 已处理过且未变动 → 廉价跳过
                 continue
             last_size, cnt = seen.get(key, (None, 0))
             cnt = cnt + 1 if (size > 0 and size == last_size) else 0
@@ -213,7 +301,10 @@ def run_watch(cfg: dict, separator) -> None:
             if cnt >= cfg["stable"]:          # 大小稳定，认为写入完成
                 seen.pop(key, None)
                 try:
-                    process_one(ncm, cfg, separator, processed, failed)
+                    if not dedup.need_process(ncm, size, mtime):
+                        continue
+                    ok = process_one(ncm, cfg, separator)
+                    dedup.mark(ncm, ok)
                 except Exception as e:  # noqa: BLE001
                     log.exception("处理 %s 时出错：%s", ncm.name, e)
         # 清理已不存在文件的记录
@@ -250,6 +341,9 @@ def load_config() -> dict:
         cfg["poll"] = float(data["poll"])
     if data.get("stable") is not None:
         cfg["stable"] = int(data["stable"])
+    # 去重方式（只接受合法值，否则保持默认）
+    if data.get("dedup") in ("record", "move"):
+        cfg["dedup"] = data["dedup"]
     return cfg
 
 
@@ -264,13 +358,15 @@ def parse_args() -> dict:
     ap.add_argument("--bitrate", default=base["bitrate"],            help="伴奏 mp3 码率")
     ap.add_argument("--poll",    type=float, default=base["poll"],   help="轮询间隔(秒)")
     ap.add_argument("--stable",  type=int,   default=base["stable"], help="写入稳定检测次数")
+    ap.add_argument("--dedup",   choices=["record", "move"], default=base["dedup"],
+                    help="去重方式：record=原文件留在原地用哈希清单 / move=移到 processed")
     ap.add_argument("--once",    action="store_true",                help="批处理一次后退出")
     a = ap.parse_args()
     return {
         "watch": a.watch, "output": a.output, "ncmdump": a.ncmdump,
         "model": a.model, "model_dir": base["model_dir"],
         "fmt": a.fmt, "bitrate": a.bitrate, "poll": a.poll,
-        "stable": a.stable, "once": a.once,
+        "stable": a.stable, "dedup": a.dedup, "once": a.once,
     }
 
 
@@ -282,13 +378,15 @@ def main() -> None:
         log.error("找不到 ncmdump-go.exe：%s", cfg["ncmdump"])
         sys.exit(1)
 
+    cfg["watch"].mkdir(parents=True, exist_ok=True)
+    dedup = make_dedup(cfg, cfg["watch"])
     separator = make_separator(cfg)
 
     try:
         if cfg["once"]:
-            run_once(cfg, separator)
+            run_once(cfg, separator, dedup)
         else:
-            run_watch(cfg, separator)
+            run_watch(cfg, separator, dedup)
     except KeyboardInterrupt:
         log.info("已退出。")
 
