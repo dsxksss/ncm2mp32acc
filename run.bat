@@ -9,5 +9,5 @@ if not exist "%PY%" set "PY=python"
 "%PY%" ncm2acc.py %*
 
 echo.
-echo 程序已结束。
+echo 程序已结束（关闭本窗口即可）。
 pause

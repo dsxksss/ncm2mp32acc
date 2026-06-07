@@ -1,0 +1,6 @@
+# 批处理文件必须用 CRLF，否则 Windows cmd 解析异常（双击闪退）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制
+*.exe binary

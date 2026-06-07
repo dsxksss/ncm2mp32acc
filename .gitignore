@@ -12,3 +12,6 @@ watch/
 
 # 日志
 *.log
+
+# 个人配置（含本机路径），用 config.toml.example 作为模板
+config.toml

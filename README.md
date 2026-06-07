@@ -52,12 +52,18 @@ python -m venv .venv
 
 ### 配置文件 config.toml（推荐）
 
-不想每次敲参数？直接编辑 [`config.toml`](config.toml) 改监听 / 输出路径，保存即生效：
+不想每次敲参数？复制模板 [`config.toml.example`](config.toml.example) 为 `config.toml`，改监听 / 输出路径，保存即生效：
+
+```powershell
+copy config.toml.example config.toml
+```
 
 ```toml
 watch  = 'D:\Music\网易云下载'   # 监听目录
 output = 'D:\Music\伴奏'          # 输出目录
 ```
+
+> `config.toml` 已被 `.gitignore` 忽略（含本机路径，不纳入版本控制）。没有它时程序回落到内置默认（程序目录下的 `watch\` / `output\`）。
 
 优先级：**命令行参数 > config.toml > 内置默认**。某项留空 `''` 即用默认值。
 
